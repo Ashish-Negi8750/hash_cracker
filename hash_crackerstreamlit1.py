@@ -1,10 +1,9 @@
-import streamlit as st
-import hashlib
-import itertools
-import multiprocessing
+#!/usr/bin/env python3
+import argparse, hashlib, itertools, multiprocessing, time
 from datetime import datetime
+from tqdm import tqdm
 
-# --- Hashing Function ---
+# --- Hashing ---
 def hash_word(word, algo):
     word = word.strip()
     if algo == "md5":
@@ -13,8 +12,7 @@ def hash_word(word, algo):
         return hashlib.sha1(word.encode()).hexdigest()
     elif algo == "sha256":
         return hashlib.sha256(word.encode()).hexdigest()
-    else:
-        return None
+    return None
 
 # --- Mutation Engine ---
 def mutate(word):
@@ -46,7 +44,7 @@ def parse_mask(mask):
             i += 1
     return (''.join(candidate) for candidate in itertools.product(*charset_list))
 
-# --- Brute-force Generator (Multiprocessing) ---
+# --- Brute-force Worker ---
 def brute_worker(args):
     word, target_hash, algo = args
     return word if hash_word(word, algo) == target_hash else None
@@ -64,88 +62,80 @@ def log_result(password, hash_value, algo):
     with open("cracked_log.txt", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now()} | {algo.upper()} | {hash_value} → {password}\n")
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="Ultimate Hash Cracker", layout="wide")
-st.title("🔐 Ultimate Hash Cracker")
-target_hash = st.text_input("Enter the hash to crack")
-algo = st.selectbox("Select hash algorithm", ["md5", "sha1", "sha256"])
+# --- Main CLI ---
+def main():
+    parser = argparse.ArgumentParser(description="Ultimate Hash Cracker")
+    parser.add_argument("--mode", required=True, choices=["dictionary", "rule", "brute", "mask", "combo"])
+    parser.add_argument("--hash", required=True, help="Target hash to crack")
+    parser.add_argument("--algo", required=True, choices=["md5", "sha1", "sha256"])
+    parser.add_argument("--wordlist", help="Path to wordlist")
+    parser.add_argument("--wordlist2", help="Second wordlist for combinator")
+    parser.add_argument("--charset", help="Charset for brute-force")
+    parser.add_argument("--maxlen", type=int, help="Max length for brute-force")
+    parser.add_argument("--mask", help="Mask pattern")
+    args = parser.parse_args()
 
-tabs = st.tabs(["Dictionary", "Rule-based", "Brute-force", "Mask", "Combinator"])
+    start = time.time()
+    attempts = 0
+    found = None
 
-# --- Dictionary Mode ---
-with tabs[0]:
-    st.subheader("📘 Dictionary Attack")
-    uploaded_file = st.file_uploader("Upload a wordlist (.txt)", key="dict")
-    if st.button("Run Dictionary Attack"):
-        if uploaded_file and target_hash:
-            wordlist = uploaded_file.read().decode(errors="ignore").splitlines()
-            for word in wordlist:
-                if hash_word(word, algo) == target_hash:
-                    st.success(f"✅ Password found: {word}")
-                    log_result(word, target_hash, algo)
+    if args.mode == "dictionary":
+        with open(args.wordlist, "r", encoding="utf-8", errors="ignore") as f:
+            words = f.read().splitlines()
+        for word in tqdm(words, desc="Dictionary", unit="word"):
+            attempts += 1
+            if hash_word(word, args.algo) == args.hash:
+                found = word
+                break
+
+    elif args.mode == "rule":
+        with open(args.wordlist, "r", encoding="utf-8", errors="ignore") as f:
+            words = f.read().splitlines()
+        for word in tqdm(words, desc="Rule-based", unit="word"):
+            for variant in mutate(word):
+                attempts += 1
+                if hash_word(variant, args.algo) == args.hash:
+                    found = variant
                     break
-            else:
-                st.error("❌ No match found.")
+            if found: break
 
-# --- Rule-based Mode ---
-with tabs[1]:
-    st.subheader("🧠 Rule-based Attack")
-    uploaded_file = st.file_uploader("Upload a wordlist (.txt)", key="rule")
-    if st.button("Run Rule-based Attack"):
-        if uploaded_file and target_hash:
-            raw = uploaded_file.read().decode(errors="ignore").splitlines()
-            for word in raw:
-                for variant in mutate(word):
-                    if hash_word(variant, algo) == target_hash:
-                        st.success(f"✅ Password found: {variant}")
-                        log_result(variant, target_hash, algo)
+    elif args.mode == "brute":
+        result = brute_force_parallel(args.hash, args.charset, args.maxlen, args.algo)
+        found = result
+        # Brute-force attempts are hard to count precisely in parallel mode
+
+    elif args.mode == "mask":
+        for word in tqdm(parse_mask(args.mask), desc="Mask", unit="word"):
+            attempts += 1
+            if hash_word(word, args.algo) == args.hash:
+                found = word
+                break
+
+    elif args.mode == "combo":
+        with open(args.wordlist, "r", encoding="utf-8", errors="ignore") as f1, open(args.wordlist2, "r", encoding="utf-8", errors="ignore") as f2:
+            list1 = f1.read().splitlines()
+            list2 = f2.read().splitlines()
+        for w1 in tqdm(list1, desc="Combinator", unit="word"):
+            for w2 in list2:
+                for combo in [w1 + w2, w2 + w1]:
+                    attempts += 1
+                    if hash_word(combo, args.algo) == args.hash:
+                        found = combo
                         break
-            else:
-                st.error("❌ No match found.")
+                if found: break
+            if found: break
 
-# --- Brute-force Mode ---
-with tabs[2]:
-    st.subheader("💣 Brute-force Attack")
-    max_len = st.slider("Max length", 1, 6, 4)
-    charset = st.text_input("Character set", value="abcdefghijklmnopqrstuvwxyz0123456789")
-    if st.button("Run Brute-force Attack"):
-        if target_hash:
-            result = brute_force_parallel(target_hash, charset, max_len, algo)
-            if result:
-                st.success(f"✅ Password found: {result}")
-                log_result(result, target_hash, algo)
-            else:
-                st.error("❌ No match found.")
+    # --- Output ---
+    if found:
+        print(f"\n[✓] Password found: {found}")
+        print(f"[✓] Hash: {args.hash}")
+        print(f"[✓] Algorithm: {args.algo.upper()}")
+        log_result(found, args.hash, args.algo)
+    else:
+        print("\n[-] No match found.")
 
-# --- Mask Mode ---
-with tabs[3]:
-    st.subheader("🎭 Mask Attack")
-    mask = st.text_input("Enter mask (e.g., ?l?l?d)")
-    if st.button("Run Mask Attack"):
-        if mask and target_hash:
-            for word in parse_mask(mask):
-                if hash_word(word, algo) == target_hash:
-                    st.success(f"✅ Password found: {word}")
-                    log_result(word, target_hash, algo)
-                    break
-            else:
-                st.error("❌ No match found.")
+    print(f"[⏱] Time taken: {time.time() - start:.2f} seconds")
+    print(f"[🔍] Attempts: {attempts if attempts else 'N/A (parallel mode)'}")
 
-# --- Combinator Mode ---
-with tabs[4]:
-    st.subheader("🔗 Combinator Attack")
-    file1 = st.file_uploader("Upload first wordlist", key="combo1")
-    file2 = st.file_uploader("Upload second wordlist", key="combo2")
-    if st.button("Run Combinator Attack"):
-        if file1 and file2 and target_hash:
-            list1 = file1.read().decode(errors="ignore").splitlines()
-            list2 = file2.read().decode(errors="ignore").splitlines()
-            for w1 in list1:
-                for w2 in list2:
-                    for combo in [w1 + w2, w2 + w1]:
-                        if hash_word(combo, algo) == target_hash:
-                            st.success(f"✅ Password found: {combo}")
-                            log_result(combo, target_hash, algo)
-                            break
-            else:
-                st.error("❌ No match found.")
+if __name__ == "__main__":
+    main()
